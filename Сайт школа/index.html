@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Веб — Windows XP (папки, корзина, перетаскивание)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root { --taskbar-height:40px; --icon-size:120px; --grid:140px; }
+  html,body{height:100%;margin:0;font-family:Tahoma,Arial,sans-serif;background:#4a90e2;}
+  body {
+    background: url('image/b.jpg') no-repeat center center fixed;
+    background-size: cover;
+    overflow: hidden;
+  }
+
+  /* Desktop */
+  .desktop { position:absolute; top:0; left:0; right:0; bottom:var(--taskbar-height); user-select:none; }
+
+  /* App icon */
+  .app-icon {
+    position:absolute;
+    width: var(--icon-size);
+    text-align:center;
+    cursor:grab;
+    color:white;
+    font-size:14px;
+  }
+  .app-icon:active { cursor:grabbing; }
+  .app-icon img {
+    width: var(--icon-size); height: var(--icon-size);
+    display:block; margin:0 auto;
+    border-radius:12px; object-fit:cover;
+    box-shadow:0 2px 6px rgba(0,0,0,0.45); background:#222;
+  }
+  .app-icon .label {
+    margin-top:6px; display:block;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    font-weight:600; pointer-events:none; color:#fff;
+  }
+
+  /* Taskbar */
+  .taskbar {
+    position:absolute; left:0; right:0; bottom:0; height:var(--taskbar-height);
+    background:linear-gradient(to top,#1d3fa3,#3a75f2); border-top:2px solid #003c74;
+    display:flex; align-items:center; gap:8px; padding:4px;
+  }
+  .taskbar-apps { display:flex; gap:6px; align-items:center; padding-left:6px; overflow:auto; }
+  .taskbar-btn { background:#e6e6e6; border:1px solid #999; border-radius:4px; padding:4px 8px; cursor:pointer; white-space:nowrap;}
+  .taskbar-btn.active{ background:#cce0ff; border-color:#003c74; }
+
+  /* Window */
+  .window {
+    position:fixed; top:12%; left:12%; width:560px; height:420px;
+    background:#fff; border:2px solid #003399; border-radius:6px;
+    box-shadow:6px 8px 30px rgba(0,0,0,0.45); overflow:hidden;
+  }
+  .header {
+    background:linear-gradient(to bottom,#245edb,#003399); color:#fff; padding:6px;
+    display:flex; justify-content:space-between; align-items:center; cursor:move;
+  }
+  .header .title { font-weight:700; }
+  .header .controls button { border:none; background:transparent; color:#fff; font-weight:700; cursor:pointer; margin-left:6px; }
+  .content { width:100%; height:calc(100% - 34px); padding:10px; box-sizing:border-box; overflow:auto; display:flex; align-items:center; justify-content:center; }
+  .resizer { width:18px; height:18px; position:absolute; right:0; bottom:0; cursor:se-resize; }
+
+  /* Context menus */
+  .context-menu {
+    position:absolute; z-index:2000; display:none; background:#fff; border:1px solid #666; border-radius:4px;
+    box-shadow:2px 2px 8px rgba(0,0,0,0.4);
+  }
+  .context-menu button {
+    display:block; width:200px; padding:8px 10px; border:none; background:none; text-align:left; cursor:pointer;
+  }
+  .context-menu button:hover { background:#cce0ff; }
+
+  /* Dialog */
+  .dialog-overlay {
+    position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; z-index:3000;
+  }
+  .dialog {
+    width:360px; background:#fff; border:2px solid #003399; border-radius:6px; box-shadow:4px 6px 14px rgba(0,0,0,0.6);
+  }
+  .dialog .hdr { background:linear-gradient(to bottom,#245edb,#003399); color:#fff; padding:8px; font-weight:700; }
+  .dialog .body { padding:16px; }
+  .dialog .actions { display:flex; justify-content:flex-end; gap:8px; padding:10px; }
+
+  /* folder grid inside window */
+  .folder-grid { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start; }
+  .small-icon { width:80px; text-align:center; }
+  .small-icon img { width:64px; height:64px; border-radius:8px; display:block; margin:0 auto; }
+  .small-label { margin-top:6px; font-size:13px; color:#111; }
+
+  /* simple responsive */
+  @media (max-width:700px){
+    .window { width:90%; height:70%; left:5%; top:8%; }
+  }
+</style>
+</head>
+<body>
+  <div class="desktop"></div>
+  <div class="taskbar"><div class="taskbar-apps"></div></div>
+
+  <!-- Контекстные меню -->
+  <div id="desktopMenu" class="context-menu">
+    <button id="ctxCreateFolder">Создать папку</button>
+  </div>
+
+  <div id="iconMenu" class="context-menu">
+    <button id="ctxMoveTo">Переместить в...</button>
+    <div id="moveList" style="display:none;"></div>
+    <button id="ctxDelete">Удалить в Корзину</button>
+    <button id="ctxRename">Переименовать</button>
+  </div>
+
+<script>
+/* ========= Модель данных =========
+   Каждый объект:
+     id: уникальный строковый id
+     name: строка
+     type: 'app' | 'folder' | 'trash'
+     icon: путь
+     url: для image
+     parent: id родителя (null = рабочий стол)
+     children: [] для папок (хранит ids)
+*/
+const STORAGE_KEY = 'winxp_data_v1';
+
+let data = loadData() || initialData();
+saveData();
+
+function initialData(){
+  // создаём уникальные id простым способом
+  const makeId = n=>n+'-'+Math.random().toString(36).slice(2,9);
+  const mem = { id: makeId('mem'), name:'Мем', type:'app', icon:'image/mem_tut_logo.png', url:'image/mem_tut.jpeg', parent:null };
+  const clicker = { id: makeId('click'), name:'Кликер', type:'app', icon:'image/clicker.png', parent:null };
+  const snake = { id: makeId('snake'), name:'Змейка', type:'app', icon:'image/snakes_logo.png', parent:null };
+  const trash = { id: 'trash', name:'Корзина', type:'trash', icon:'image/bin.png', parent:null, children: [] };
+  return { apps: [mem, clicker, snake, trash], positions: {} };
+}
+
+function saveData(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+function loadData(){ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)); }catch(e){ return null; }}
+
+/* ======== Элементы DOM ======== */
+const desktop = document.querySelector('.desktop');
+const taskbarApps = document.querySelector('.taskbar-apps');
+const desktopMenu = document.getElementById('desktopMenu');
+const iconMenu = document.getElementById('iconMenu');
+const ctxCreateFolderBtn = document.getElementById('ctxCreateFolder');
+const ctxMoveToBtn = document.getElementById('ctxMoveTo');
+const ctxDeleteBtn = document.getElementById('ctxDelete');
+const ctxRenameBtn = document.getElementById('ctxRename');
+const moveList = document.getElementById('moveList');
+
+let currentContextTargetId = null; // id приложения, по которому открыт контекст-меню (iconMenu)
+let desktopMenuVisible = false;
+
+/* ======== Вспомогательные функции ======== */
+function findById(id){ return data.apps.find(a=>a.id===id); }
+function childrenOf(id){ return data.apps.filter(a=>a.parent===id); }
+function topLevel(){ return data.apps.filter(a=>a.parent===null); }
+function isFolder(a){ return a && (a.type==='folder' || a.type==='trash'); }
+function ensureSave(){ saveData(); renderAll(); }
+
+/* ======== Рисуем иконки на рабочем столе ======== */
+function renderAll(){
+  desktop.innerHTML = '';
+  // рендер иконок, только те у кого parent == null
+  const tops = topLevel();
+  const cols = Math.max(1, Math.floor((window.innerWidth - 40) / parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid') || 140)));
+  tops.forEach((item, index) => {
+    const el = makeIconElement(item);
+    // позиция: если в data.positions есть - используем, иначе сетка
+    const pos = data.positions && data.positions[item.id];
+    if(pos){ el.style.left = pos.left + 'px'; el.style.top = pos.top + 'px'; }
+    else {
+      const col = index % cols, row = Math.floor(index / cols);
+      el.style.left = (20 + col * parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid') || 140)) + 'px';
+      el.style.top  = (20 + row * parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid') || 140)) + 'px';
+    }
+    desktop.appendChild(el);
+  });
+  renderTaskbar();
+}
+
+/* Создать DOM-иконку */
+function makeIconElement(item){
+  const el = document.createElement('div');
+  el.className = 'app-icon';
+  el.dataset.id = item.id;
+  el.innerHTML = `<img src="${item.icon}" alt=""><span class="label">${item.name}</span>`;
+  // drag
+  makeDraggable(el);
+  // dblclick open
+  el.addEventListener('dblclick', (e)=>{ openItem(item.id); });
+  // contextmenu on icon
+  el.addEventListener('contextmenu', e=>{
+    e.preventDefault(); e.stopPropagation();
+    currentContextTargetId = item.id;
+    showIconMenu(e.pageX, e.pageY, item);
+  });
+  return el;
+}
+
+/* ======== Dragging for icons (pointer API) ======== */
+function makeDraggable(el){
+  el.style.touchAction = 'none';
+  let dragging=false, sX=0, sY=0, oL=0, oT=0, moved=false;
+  el.addEventListener('pointerdown', e=>{
+    el.setPointerCapture(e.pointerId);
+    dragging=true; moved=false;
+    sX = e.clientX; sY = e.clientY;
+    oL = parseInt(el.style.left || 0); oT = parseInt(el.style.top || 0);
+    el.style.zIndex = 1000;
+  });
+  el.addEventListener('pointermove', e=>{
+    if(!dragging) return;
+    const dx = e.clientX - sX, dy = e.clientY - sY;
+    if(Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+    // ограничение в пределах рабочего стола
+    const rect = desktop.getBoundingClientRect();
+    let nx = oL + dx, ny = oT + dy;
+    nx = Math.max(0, Math.min(nx, rect.width - el.offsetWidth));
+    ny = Math.max(0, Math.min(ny, rect.height - el.offsetHeight));
+    el.style.left = nx + 'px'; el.style.top = ny + 'px';
+  });
+  el.addEventListener('pointerup', e=>{
+    if(!dragging) return;
+    dragging=false;
+    try{ el.releasePointerCapture(e.pointerId); }catch{}
+    el.style.zIndex = '';
+    // detect drop on folder icon
+    if(moved){
+      const targetFolder = folderUnderElement(el);
+      if(targetFolder){
+        moveItemTo(currentIdFromEl(el), targetFolder.id);
+        ensureSave();
+        return;
+      }
+      // otherwise save position
+      const id = currentIdFromEl(el);
+      data.positions = data.positions || {};
+      data.positions[id] = { left: parseInt(el.style.left), top: parseInt(el.style.top) };
+      saveData();
+    }
+  });
+  el.addEventListener('pointercancel', e=>{
+    dragging=false; try{ el.releasePointerCapture(e.pointerId); }catch{} el.style.zIndex='';
+  });
+}
+
+function currentIdFromEl(el){ return el.dataset.id; }
+
+/* возвращает папку (item) под элементом el - если иконка брошена над иконкой папки */
+function folderUnderElement(el){
+  const rect = el.getBoundingClientRect();
+  const icons = [...document.querySelectorAll('.app-icon')];
+  for(const other of icons){
+    if(other === el) continue;
+    const id = other.dataset.id; const item = findById(id);
+    if(!isFolder(item)) continue;
+    const r = other.getBoundingClientRect();
+    // проверяем пересечение центров
+    const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+    if(cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) return item;
+  }
+  return null;
+}
+
+/* ======== Context menus ======== */
+/* desktop context */
+document.addEventListener('contextmenu', e=>{
+  // если клик по пустому месту на desktop
+  if(e.target === desktop || e.target === document.body || e.target === document.documentElement){
+    e.preventDefault();
+    showDesktopMenu(e.pageX, e.pageY);
+  }
+  // otherwise allow icon handlers to show their menu
+});
+function showDesktopMenu(x,y){
+  desktopMenu.style.left = x + 'px';
+  desktopMenu.style.top = y + 'px';
+  desktopMenu.style.display = 'block';
+  iconMenu.style.display = 'none';
+}
+document.addEventListener('click', ()=>{ desktopMenu.style.display='none'; iconMenu.style.display='none'; moveList.style.display='none'; });
+
+ctxCreateFolderBtn.addEventListener('click', ()=>{
+  const name = prompt('Имя папки','Новая папка');
+  if(!name) return;
+  const id = 'f-'+Math.random().toString(36).slice(2,9);
+  const folder = { id, name, type:'folder', icon:'image/p.png', parent:null, children:[] };
+  data.apps.push(folder);
+  saveData();
+  renderAll();
+});
+
+/* icon menu */
+function showIconMenu(x,y,item){
+  // build move list
+  buildMoveList();
+  iconMenu.style.left = x + 'px';
+  iconMenu.style.top = y + 'px';
+  iconMenu.style.display = 'block';
+}
+function buildMoveList(){
+  // populate moveList with buttons for folders (including trash)
+  moveList.innerHTML = '';
+  const folders = data.apps.filter(a=>isFolder(a));
+  folders.forEach(f=>{
+    const b = document.createElement('button');
+    b.textContent = '→ ' + f.name;
+    b.style.display = 'block';
+    b.style.width = '100%';
+    b.onclick = (ev)=>{
+      ev.stopPropagation();
+      if(!currentContextTargetId) return;
+      moveItemTo(currentContextTargetId, f.id);
+      iconMenu.style.display='none';
+      saveData(); renderAll();
+    };
+    moveList.appendChild(b);
+  });
+  // toggle visibility when clicking "Переместить в..."
+  ctxMoveToBtn.onclick = (e)=>{
+    e.stopPropagation();
+    moveList.style.display = moveList.style.display === 'block' ? 'none' : 'block';
+    // position under ctxMoveToBtn
+    const rect = ctxMoveToBtn.getBoundingClientRect();
+    moveList.style.position = 'absolute';
+    moveList.style.left = (rect.right + 4) + 'px';
+    moveList.style.top = (rect.top) + 'px';
+    moveList.style.background = '#fff';
+    moveList.style.border = '1px solid #666';
+    moveList.style.zIndex = 3000;
+  };
+}
+
+ctxDeleteBtn.onclick = (e)=>{
+  e.stopPropagation();
+  if(!currentContextTargetId) return;
+  moveToTrash(currentContextTargetId);
+  iconMenu.style.display='none';
+  saveData(); renderAll();
+};
+
+ctxRenameBtn.onclick = (e)=>{
+  e.stopPropagation();
+  if(!currentContextTargetId) return;
+  const item = findById(currentContextTargetId);
+  const newName = prompt('Новое имя', item.name);
+  if(newName) { item.name = newName; saveData(); renderAll(); }
+  iconMenu.style.display='none';
+};
+
+/* ======== Перемещение и удаление логика ======== */
+function moveItemTo(itemId, folderId){
+  const it = findById(itemId);
+  const folder = findById(folderId);
+  if(!it || !folder) return;
+  // если folder.type==='trash' — помещаем в корзину (children содержит ids)
+  if(folder.type === 'trash'){
+    moveToTrash(itemId);
+    return;
+  }
+  // переместить: установить parent = folderId
+  it.parent = folderId;
+  // remove position (will be shown inside folder window)
+  if(data.positions && data.positions[it.id]) delete data.positions[it.id];
+  saveData();
+  renderAll();
+}
+
+function moveToTrash(itemId){
+  const item = findById(itemId);
+  const trash = data.apps.find(a=>a.type==='trash');
+  if(!item || !trash) return;
+  // если уже в корзине - ничего
+  if(item.parent === trash.id) return;
+  // сохраняем originalParent чтобы можно было восстановить
+  item._originalParent = item.parent === undefined ? null : item.parent;
+  item.parent = trash.id;
+  saveData();
+}
+
+/* ======== Открытие элементов: папка/приложение/корзина ======== */
+function openItem(id){
+  const item = findById(id);
+  if(!item) return;
+  if(item.type === 'app'){
+    openAppWindow(item);
+    return;
+  }
+  if(isFolder(item)){
+    openFolderWindow(item);
+    return;
+  }
+}
+
+/* ======== Окна приложений (мем / кликер / змейка) ======== */
+function openAppWindow(item){
+  // если уже открыто — активировать
+  const existing = document.querySelector(`.window[data-id="${item.id}"]`);
+  if(existing){ existing.style.display='block'; bringToFront(existing); return; }
+
+  const win = document.createElement('div');
+  win.className = 'window';
+  win.dataset.id = item.id;
+  win.innerHTML = `
+    <div class="header"><div class="title">${item.name}</div>
+      <div class="controls"><button class="min">_</button><button class="max">⬜</button><button class="close">X</button></div>
+    </div>
+    <div class="content"></div>
+    <div class="resizer"></div>
+  `;
+  const content = win.querySelector('.content');
+
+  if(item.name === 'Мем' && item.url){
+    content.innerHTML = `<img src="${item.url}" style="max-width:100%;max-height:100%;">`;
+  } else if(item.name === 'Кликер'){
+    content.innerHTML = `<div style="text-align:center"><h2>Кликер</h2><button id="clkBtn" class="btn">Кликни!</button><div id="clkCnt">Кликов: 0</div><div id="expl" style="color:red;font-weight:700"></div></div>`;
+  } else if(item.name === 'Змейка'){
+    content.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;"><div class="score">Очки: 0</div><canvas width="400" height="350"></canvas><div class="end-message" style="color:#b00;font-weight:700"></div><button class="btn restart" style="display:none;margin-top:8px">Играть снова</button></div>`;
+  } else {
+    content.innerHTML = `<div>Запуск ${item.name}</div>`;
+  }
+
+  document.body.appendChild(win);
+  makeWindowInteractive(win, item.id);
+  addTaskbarButton(item.id, item.name);
+
+  // init app logic
+  if(item.name === 'Кликер'){
+    const btn = win.querySelector('#clkBtn');
+    const cnt = win.querySelector('#clkCnt');
+    const expl = win.querySelector('#expl');
+    btn.addEventListener('click', ()=>{
+      let n = parseInt(cnt.dataset.count || '0'); n++; cnt.dataset.count = n; cnt.textContent = 'Кликов: ' + n;
+      if(n >= 100){ btn.remove(); expl.textContent = '💥 Кликер взорвался!'; const iconEl = document.querySelector(`.app-icon[data-id="${item.id}"] img`); if(iconEl) iconEl.src = 'https://via.placeholder.com/120/000000/FF0000?text=🔥'; }
+    });
+  }
+  if(item.name === 'Змейка') {
+    setTimeout(()=> startSnakeInWindow(win), 50);
+  }
+}
+
+/* ======== Файловое окно (папка / корзина) ======== */
+function openFolderWindow(folder){
+  const existing = document.querySelector(`.window[data-id="${folder.id}"]`);
+  if(existing){ existing.style.display='block'; bringToFront(existing); return; }
+
+  const win = document.createElement('div');
+  win.className = 'window';
+  win.dataset.id = folder.id;
+  win.innerHTML = `
+    <div class="header"><div class="title">${folder.name}</div>
+      <div class="controls"><button class="min">_</button><button class="max">⬜</button><button class="close">X</button></div>
+    </div>
+    <div class="content">
+      <div style="width:100%">
+        <div style="margin-bottom:8px">
+          <button class="btn" id="openAll">Открыть</button>
+          ${folder.type === 'trash' ? '<button class="btn" id="emptyTrash">Очистить корзину</button>' : ''}
+        </div>
+        <div class="folder-grid" id="folderGrid"></div>
+      </div>
+    </div>
+    <div class="resizer"></div>
+  `;
+  document.body.appendChild(win);
+  makeWindowInteractive(win, folder.id);
+  addTaskbarButton(folder.id, folder.name);
+
+  const grid = win.querySelector('#folderGrid');
+  // показываем содержимое: все items with parent == folder.id
+  const children = data.apps.filter(a => a.parent === folder.id);
+  if(children.length === 0) grid.innerHTML = '<div style="color:#666">Папка пуста</div>';
+  else {
+    grid.innerHTML = '';
+    children.forEach(ch => {
+      const s = document.createElement('div');
+      s.className = 'small-icon';
+      s.innerHTML = `<img src="${ch.icon}"><div class="small-label">${ch.name}</div>`;
+      s.addEventListener('dblclick', ()=> openItem(ch.id));
+      s.addEventListener('contextmenu', e=>{
+        e.preventDefault(); currentContextTargetId = ch.id; showIconMenu(e.pageX, e.pageY, ch);
+      });
+      grid.appendChild(s);
+    });
+  }
+
+  // empty trash logic
+  if(folder.type === 'trash'){
+    const emptyBtn = win.querySelector('#emptyTrash');
+    emptyBtn.addEventListener('click', ()=> {
+      dialogConfirm('Очистка корзины', 'Вы уверены, что хотите окончательно удалить все элементы из корзины?', ()=>{
+        // remove items permanently
+        data.apps = data.apps.filter(a=> a.parent !== folder.id);
+        // ensure trash children cleared
+        const trash = data.apps.find(a=>a.type==='trash');
+        if(trash) trash.children = [];
+        saveData(); renderAll();
+        // close folder window
+        win.remove(); removeTaskbarButton(folder.id);
+      });
+    });
+  }
+}
+
+/* ======== Окна: общая интерактивность (перетаскивание, управлениями) ======== */
+function makeWindowInteractive(win, id){
+  // close/min/max
+  const closeBtn = win.querySelector('.close');
+  const minBtn = win.querySelector('.min');
+  const maxBtn = win.querySelector('.max');
+  closeBtn && closeBtn.addEventListener('click', ()=> { win.remove(); removeTaskbarButton(id); });
+  minBtn && minBtn.addEventListener('click', ()=> { win.style.display = 'none'; });
+  // maximize toggle
+  let maximized=false, restore={};
+  if(maxBtn){
+    maxBtn.addEventListener('click', ()=>{
+      if(!maximized){
+        restore = { left: win.style.left || win.offsetLeft + 'px', top: win.style.top || win.offsetTop + 'px', width: win.style.width || win.offsetWidth + 'px', height: win.style.height || win.offsetHeight + 'px' };
+        win.style.left = '0'; win.style.top = '0';
+        win.style.width = '100vw'; win.style.height = `calc(100vh - ${document.querySelector('.taskbar').offsetHeight}px)`;
+        win.style.borderRadius = '0'; maximized = true; maxBtn.textContent = '🗗';
+      } else {
+        win.style.left = restore.left; win.style.top = restore.top;
+        win.style.width = restore.width; win.style.height = restore.height;
+        win.style.borderRadius = '6px'; maximized = false; maxBtn.textContent = '⬜';
+      }
+    });
+  }
+
+  // dragging header
+  const header = win.querySelector('.header');
+  header.style.touchAction = 'none';
+  let dragging=false, sX=0, sY=0, oL=0, oT=0;
+  header.addEventListener('pointerdown', (e)=>{
+    dragging=true; sX=e.clientX; sY=e.clientY;
+    oL = parseInt(win.style.left || win.offsetLeft); oT = parseInt(win.style.top || win.offsetTop);
+    bringToFront(win);
+  });
+  document.addEventListener('pointermove', (e)=>{ if(!dragging || maximized) return; const nx=oL+(e.clientX-sX), ny=oT+(e.clientY-sY); win.style.left = nx+'px'; win.style.top = ny+'px'; });
+  document.addEventListener('pointerup', ()=> dragging=false);
+
+  // resizer
+  const resizer = win.querySelector('.resizer');
+  let resizing=false, rSX=0, rSY=0, rSW=0, rSH=0;
+  resizer.addEventListener('pointerdown', e=>{ resizing=true; rSX=e.clientX; rSY=e.clientY; rSW=win.offsetWidth; rSH=win.offsetHeight; e.preventDefault(); });
+  document.addEventListener('pointermove', e=>{ if(!resizing) return; win.style.width = Math.max(200, rSW + (e.clientX - rSX)) + 'px'; win.style.height = Math.max(120, rSH + (e.clientY - rSY)) + 'px'; });
+  document.addEventListener('pointerup', ()=>{ resizing=false; });
+  bringToFront(win);
+}
+
+/* ======== Taskbar buttons ======== */
+function addTaskbarButton(id, title){
+  if(taskbarApps.querySelector(`[data-id="${id}"]`)) return;
+  const b = document.createElement('div');
+  b.className = 'taskbar-btn active'; b.dataset.id = id; b.textContent = title;
+  b.addEventListener('click', ()=>{
+    const w = document.querySelector(`.window[data-id="${id}"]`);
+    if(!w) return;
+    if(w.style.display === 'none') { w.style.display = 'block'; bringToFront(w); }
+    else { w.style.display = 'none'; b.classList.remove('active'); }
+  });
+  taskbarApps.appendChild(b);
+}
+function removeTaskbarButton(id){
+  const el = taskbarApps.querySelector(`[data-id="${id}"]`);
+  if(el) el.remove();
+}
+
+/* ======== Bring to front ======== */
+function bringToFront(win){
+  document.querySelectorAll('.window').forEach(w=>w.style.zIndex = 1);
+  win.style.zIndex = 100;
+  // set taskbar active
+  const id = win.dataset.id;
+  document.querySelectorAll('.taskbar-btn').forEach(b=>b.classList.remove('active'));
+  const btn = taskbarApps.querySelector(`[data-id="${id}"]`);
+  if(btn) btn.classList.add('active');
+}
+
+/* ======== Snake inside window ======== */
+function startSnakeInWindow(win){
+  const canvas = win.querySelector('canvas');
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const scoreDiv = win.querySelector('.score');
+  const endMsg = win.querySelector('.end-message');
+  const restartBtn = win.querySelector('.restart');
+
+  let grid = 20; let snake = [{x:160,y:160}]; let dx = grid, dy=0;
+  let food = randomFood(), score=0, gameOver=false, gameWin=false;
+  function randomFood(){ return { x: Math.floor(Math.random()*canvas.width/grid)*grid, y: Math.floor(Math.random()*canvas.height/grid)*grid }; }
+
+  function draw(){
+    if(gameOver || gameWin) return;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='red'; ctx.fillRect(food.x,food.y,grid-2,grid-2);
+    snake.forEach((p,i)=>{ ctx.fillStyle = i===0 ? 'green' : `hsl(${(i*40)%360},70%,50%)`; ctx.fillRect(p.x,p.y,grid-2,grid-2); });
+    let head = { x: snake[0].x + dx, y: snake[0].y + dy };
+    if(head.x<0 || head.y<0 || head.x>=canvas.width || head.y>=canvas.height){ gameOver=true; endMsg.textContent='Игра окончена!'; restartBtn.style.display='block'; return; }
+    if(snake.some((p,i)=>i>0 && p.x===head.x && p.y===head.y)){ gameOver=true; endMsg.textContent='Игра окончена!'; restartBtn.style.display='block'; return; }
+    snake.unshift(head);
+    if(head.x===food.x && head.y===food.y){ score++; scoreDiv.textContent='Очки: '+score; food=randomFood(); if(score>=30){ gameWin=true; endMsg.textContent='🎉 Победа!'; restartBtn.style.display='block'; } }
+    else snake.pop();
+  }
+  document.addEventListener('keydown', e=>{
+    if(gameOver||gameWin) return;
+    if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) e.preventDefault();
+    const key = e.key.toLowerCase();
+    if((key==='arrowleft' || key==='a') && dx===0){ dx=-grid; dy=0; }
+    else if((key==='arrowright' || key==='d') && dx===0){ dx=grid; dy=0; }
+    else if((key==='arrowup' || key==='w') && dy===0){ dx=0; dy=-grid; }
+    else if((key==='arrowdown' || key==='s') && dy===0){ dx=0; dy=grid; }
+  });
+  const timer = setInterval(draw, 150);
+  restartBtn.onclick = ()=>{
+    snake = [{x:160,y:160}]; dx=grid; dy=0; score=0; scoreDiv.textContent='Очки: 0'; food=randomFood(); gameOver=false; gameWin=false; endMsg.textContent=''; restartBtn.style.display='none';
+  };
+  // cleanup when window removed
+  const obs = new MutationObserver(muts=>{ muts.forEach(m=> m.removedNodes.forEach(n=>{ if(n===win){ clearInterval(timer); obs.disconnect(); } }));});
+  obs.observe(document.body, { childList:true });
+}
+
+/* ======== Restore from trash function ======== */
+function restoreItem(itemId){
+  const item = findById(itemId);
+  if(!item) return;
+  // restore to original parent if exists, otherwise to desktop (null)
+  item.parent = item._originalParent !== undefined ? item._originalParent : null;
+  delete item._originalParent;
+  saveData(); renderAll();
+}
+
+/* ======== Utility: open trash window shows items with restore action ======== */
+/* Note: opening trash folder handled by openFolderWindow which shows children (parent==trash.id)
+   For restore from folder window we provided context menu for items. We also add a quick restore function:
+*/
+function dialogConfirm(title, text, onYes){
+  const overlay = document.createElement('div'); overlay.className='dialog-overlay';
+  overlay.innerHTML = `<div class="dialog"><div class="hdr">${title}</div><div class="body">${text}</div><div class="actions"><button id="noBtn">Нет</button><button id="yesBtn">Да</button></div></div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#noBtn').addEventListener('click', ()=> overlay.remove());
+  overlay.querySelector('#yesBtn').addEventListener('click', ()=> { overlay.remove(); onYes && onYes(); });
+}
+
+/* ======== Helpers for moving from icon (when icon in folder window is context-target) ======== */
+/* showIconMenu uses currentContextTargetId and already implemented move list */
+
+function renderTaskbar(){
+  // keep taskbar buttons for open windows only - simple approach: do nothing (buttons are added when window opened)
+}
+
+/* ======== Initialization and rendering ======== */
+renderAll();
+
+/* ======== Helpers: open context menu for icon (used by small icons inside folder window too) */
+function showIconMenu(x,y,item){
+  currentContextTargetId = item.id;
+  iconMenu.style.left = x + 'px'; iconMenu.style.top = y + 'px'; iconMenu.style.display = 'block';
+  // hide moveList until user clicks "Переместить в..."
+  moveList.style.display = 'none';
+  // ensure moveList will be rebuilt on demand
+  buildMoveList();
+}
+
+/* Build move list function (as before) - but here moveList is inside iconMenu DOM */
+function buildMoveList(){
+  // clear old
+  moveList.innerHTML = '';
+  // add buttons for each folder (including trash)
+  const folders = data.apps.filter(a=>isFolder(a));
+  folders.forEach(f=>{
+    const btn = document.createElement('button');
+    btn.style.width='100%';
+    btn.textContent = '→ ' + f.name;
+    btn.onclick = (ev)=> { ev.stopPropagation(); if(!currentContextTargetId) return; moveItemTo(currentContextTargetId, f.id); iconMenu.style.display='none'; saveData(); renderAll(); };
+    moveList.appendChild(btn);
+  });
+}
+
+/* ======== END OF SCRIPT ======== */
+
+</script>
+</body>
+</html>
